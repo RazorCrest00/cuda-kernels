@@ -1,0 +1,23 @@
+# build artifacts
+build/
+*.o
+*.obj
+*.exe
+*.out
+a.out
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# python (for bench scripts)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# data / logs
+*.log
+*.csv
+results/

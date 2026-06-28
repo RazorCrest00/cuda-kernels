@@ -1,15 +1,5 @@
-// 02 — Matrix multiply: C = A * B  (square, N x N, float)
-//
-// Three implementations, same problem, measured in GFLOP/s:
-//   1. naive    — one thread per output element, all reads from global memory
-//   2. tiled    — shared-memory tiling: each tile of A and B is loaded once
-//                 and reused by a whole block (the key GPU optimization)
-//   3. cuBLAS   — NVIDIA's tuned library, the baseline to chase
-//
-// Matmul does 2*N^3 floating-point ops but only touches O(N^2) data, so it is
-// COMPUTE-bound (unlike vector add). The naive kernel re-reads A and B from
-// slow global memory N times; tiling stages reuse through fast shared memory.
-// Watch how far naive is from cuBLAS, then how much tiling closes the gap.
+// matmul C = A*B (NxN, float). compute-bound, so we report GFLOP/s.
+// compares naive vs shared-memory tiled vs cuBLAS.
 
 #include <cstdio>
 #include <vector>
@@ -19,7 +9,7 @@
 
 #define TILE 16
 
-// --- 1. Naive: each thread computes one C[row][col] ------------------------
+// one thread per output element, all reads from global memory
 __global__ void matmul_naive(const float* A, const float* B, float* C, int N) {
   int row = blockIdx.y * blockDim.y + threadIdx.y;
   int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -30,7 +20,7 @@ __global__ void matmul_naive(const float* A, const float* B, float* C, int N) {
   }
 }
 
-// --- 2. Tiled: cooperatively stage TILE x TILE blocks into shared memory ----
+// stage TILExTILE blocks of A and B into shared memory, reuse across the block
 __global__ void matmul_tiled(const float* A, const float* B, float* C, int N) {
   __shared__ float As[TILE][TILE];
   __shared__ float Bs[TILE][TILE];
@@ -40,13 +30,15 @@ __global__ void matmul_tiled(const float* A, const float* B, float* C, int N) {
   float acc = 0.f;
 
   for (int t = 0; t < N / TILE; ++t) {
+    // load this tile
     As[threadIdx.y][threadIdx.x] = A[row * N + (t * TILE + threadIdx.x)];
     Bs[threadIdx.y][threadIdx.x] = B[(t * TILE + threadIdx.y) * N + col];
-    __syncthreads();  // wait until the whole tile is loaded
+    __syncthreads();
 
+    // accumulate from shared mem
     for (int k = 0; k < TILE; ++k)
       acc += As[threadIdx.y][k] * Bs[k][threadIdx.x];
-    __syncthreads();  // wait before overwriting the tile next iteration
+    __syncthreads();
   }
   C[row * N + col] = acc;
 }
@@ -56,7 +48,7 @@ static double gflops(int N, float ms) {
 }
 
 int main() {
-  const int N = 2048;  // divisible by TILE
+  const int N = 2048;  // multiple of TILE
   const size_t bytes = (size_t)N * N * sizeof(float);
 
   std::vector<float> h_A(N * N), h_B(N * N), h_C(N * N), h_ref(N * N);
@@ -73,8 +65,7 @@ int main() {
   dim3 grid(N / TILE, N / TILE);
   GpuTimer timer;
 
-  // --- cuBLAS baseline first, so we can check the kernels against it --------
-  // cuBLAS is column-major; computing B*A there gives (A*B) in row-major.
+  // cuBLAS baseline. it's column-major, so compute B*A to get row-major A*B.
   cublasHandle_t handle; cublasCreate(&handle);
   float alpha = 1.f, beta = 0.f;
   cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N,
@@ -84,7 +75,7 @@ int main() {
   cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N,
               &alpha, d_B, N, d_A, N, &beta, d_C, N);
   float ms_cublas = timer.stop();
-  CUDA_CHECK(cudaMemcpy(h_ref.data(), d_C, bytes, cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(h_ref.data(), d_C, bytes, cudaMemcpyDeviceToHost));  // reference
 
   auto run = [&](const char* name, void (*kern)(const float*, const float*, float*, int)) {
     kern<<<grid, block>>>(d_A, d_B, d_C, N);  // warm up

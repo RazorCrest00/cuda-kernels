@@ -1,11 +1,4 @@
-// 01 — Vector add: C[i] = A[i] + B[i]
-//
-// The "hello world" of CUDA. Goal: get the grid/block launch right, verify
-// correctness against the CPU, and measure effective memory bandwidth.
-//
-// Vector add is memory-bound: 3 floats moved (2 read, 1 write) per element,
-// almost no compute. So the number to watch is GB/s, compared against your
-// GPU's peak HBM bandwidth (e.g. ~320 GB/s on a T4).
+// vector add: C[i] = A[i] + B[i]. memory-bound, so we report GB/s.
 
 #include <cstdio>
 #include <vector>
@@ -17,12 +10,14 @@ __global__ void vector_add(const float* a, const float* b, float* c, int n) {
 }
 
 int main() {
-  const int n = 1 << 24;  // ~16.7M elements
+  const int n = 1 << 24;
   const size_t bytes = n * sizeof(float);
 
+  // host buffers
   std::vector<float> h_a(n), h_b(n), h_c(n);
   for (int i = 0; i < n; ++i) { h_a[i] = 1.0f; h_b[i] = 2.0f; }
 
+  // device buffers + copy inputs over
   float *d_a, *d_b, *d_c;
   CUDA_CHECK(cudaMalloc(&d_a, bytes));
   CUDA_CHECK(cudaMalloc(&d_b, bytes));
@@ -33,10 +28,11 @@ int main() {
   const int threads = 256;
   const int blocks = (n + threads - 1) / threads;
 
-  // Warm up, then time.
+  // warm up
   vector_add<<<blocks, threads>>>(d_a, d_b, d_c, n);
   CUDA_CHECK(cudaDeviceSynchronize());
 
+  // timed run
   GpuTimer timer;
   timer.start();
   vector_add<<<blocks, threads>>>(d_a, d_b, d_c, n);
@@ -45,7 +41,7 @@ int main() {
 
   CUDA_CHECK(cudaMemcpy(h_c.data(), d_c, bytes, cudaMemcpyDeviceToHost));
 
-  // Correctness.
+  // check
   bool ok = true;
   for (int i = 0; i < n; ++i) {
     if (h_c[i] != 3.0f) { ok = false; break; }

@@ -3,7 +3,7 @@
 #include <cstdlib>
 #include <cuda_runtime.h>
 
-// Wrap every CUDA call: CUDA_CHECK(cudaMalloc(...));
+// abort with file/line if a CUDA call fails
 #define CUDA_CHECK(call)                                                       \
   do {                                                                         \
     cudaError_t err__ = (call);                                               \
@@ -14,7 +14,7 @@
     }                                                                          \
   } while (0)
 
-// Simple GPU timer using CUDA events. Returns elapsed milliseconds.
+// GPU timing via CUDA events; stop() returns elapsed ms
 struct GpuTimer {
   cudaEvent_t start_, stop_;
   GpuTimer() {

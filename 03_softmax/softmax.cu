@@ -1,4 +1,5 @@
-// softmax over rows of an RxC matrix: y[j] = exp(x[j]) / sum_k exp(x[k]).
+// softmax over rows of an RxC matrix: y[j] = exp(x[j] - max) / sum_k exp(x[k] - max).
+// subtract the row max first so exp() can't overflow on large inputs.
 // naive: one thread does one whole row, sequentially over columns.
 
 #include <cstdio>
@@ -13,9 +14,11 @@ __global__ void softmax_naive(const float* in, float* out, int R, int C) {
   const float* x = in + (size_t)row * C;
   float* y = out + (size_t)row * C;
 
+  float m = -INFINITY;
+  for (int j = 0; j < C; ++j) m = fmaxf(m, x[j]);
   float sum = 0.f;
-  for (int j = 0; j < C; ++j) sum += expf(x[j]);
-  for (int j = 0; j < C; ++j) y[j] = expf(x[j]) / sum;
+  for (int j = 0; j < C; ++j) sum += expf(x[j] - m);
+  for (int j = 0; j < C; ++j) y[j] = expf(x[j] - m) / sum;
 }
 
 // cpu reference (stable) to check against
@@ -36,9 +39,9 @@ int main() {
   const size_t n = (size_t)R * C;
   const size_t bytes = n * sizeof(float);
 
-  // --- host buffers + inputs (small values so naive exp won't overflow) ---
+  // --- host buffers + inputs (large values: would overflow without the max trick) ---
   std::vector<float> h_in(n), h_out(n), h_ref(n);
-  for (size_t i = 0; i < n; ++i) h_in[i] = ((i % 17) - 8) * 0.1f;
+  for (size_t i = 0; i < n; ++i) h_in[i] = ((i % 17) - 8) * 12.0f;
   softmax_cpu(h_in, h_ref, R, C);
 
   // --- device buffers + copy input over ---

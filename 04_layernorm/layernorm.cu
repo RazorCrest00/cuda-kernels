@@ -30,7 +30,8 @@ __global__ void layernorm_naive(const float* in, float* out,
   for (int j = 0; j < C; ++j) y[j] = (x[j] - mean) * inv * gamma[j] + beta[j];
 }
 
-// block: one block per row, threads split columns + reduce in shared mem
+// block: one block per row. single pass over x collects sum and sum-of-squares,
+// then var = mean(x^2) - mean^2 (one reduce of each instead of two passes).
 __global__ void layernorm_block(const float* in, float* out,
                                  const float* gamma, const float* beta,
                                  int R, int C, float eps) {
@@ -38,27 +39,21 @@ __global__ void layernorm_block(const float* in, float* out,
   int t = threadIdx.x, nt = blockDim.x;
   const float* x = in + (size_t)row * C;
   float* y = out + (size_t)row * C;
-  __shared__ float red[256];
+  __shared__ float rsum[256];
+  __shared__ float rsq[256];
 
-  // mean: reduce the sum
-  float s = 0.f;
-  for (int j = t; j < C; j += nt) s += x[j];
-  red[t] = s; __syncthreads();
+  // one pass: accumulate sum and sum of squares
+  float s = 0.f, sq = 0.f;
+  for (int j = t; j < C; j += nt) { float v = x[j]; s += v; sq += v * v; }
+  rsum[t] = s; rsq[t] = sq; __syncthreads();
   for (int k = nt / 2; k > 0; k >>= 1) {
-    if (t < k) red[t] += red[t + k];
+    if (t < k) { rsum[t] += rsum[t + k]; rsq[t] += rsq[t + k]; }
     __syncthreads();
   }
-  float mean = red[0] / C; __syncthreads();
 
-  // var: reduce the sum of squared deviations
-  float v = 0.f;
-  for (int j = t; j < C; j += nt) { float d = x[j] - mean; v += d * d; }
-  red[t] = v; __syncthreads();
-  for (int k = nt / 2; k > 0; k >>= 1) {
-    if (t < k) red[t] += red[t + k];
-    __syncthreads();
-  }
-  float inv = rsqrtf(red[0] / C + eps); __syncthreads();
+  float mean = rsum[0] / C;
+  float var = rsq[0] / C - mean * mean;
+  float inv = rsqrtf(var + eps);
 
   for (int j = t; j < C; j += nt) y[j] = (x[j] - mean) * inv * gamma[j] + beta[j];
 }

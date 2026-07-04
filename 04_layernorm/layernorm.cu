@@ -1,7 +1,7 @@
 // layernorm over rows of an RxC matrix:
 //   y[j] = (x[j] - mean) / sqrt(var + eps) * gamma[j] + beta[j].
-// gamma/beta are per-column learned scale/shift.
-// compares naive (1 thread/row) vs block reduction (1 block/row).
+// also rmsnorm (what llama-style models use): y[j] = x[j] / sqrt(mean(x^2) + eps) * gamma[j].
+// compares naive vs block reduction, plus rmsnorm.
 
 #include <cstdio>
 #include <vector>
@@ -58,7 +58,28 @@ __global__ void layernorm_block(const float* in, float* out,
   for (int j = t; j < C; j += nt) y[j] = (x[j] - mean) * inv * gamma[j] + beta[j];
 }
 
-// cpu reference
+// rmsnorm: no mean subtraction, normalize by root-mean-square only
+__global__ void rmsnorm_block(const float* in, float* out,
+                              const float* gamma, int R, int C, float eps) {
+  int row = blockIdx.x;
+  int t = threadIdx.x, nt = blockDim.x;
+  const float* x = in + (size_t)row * C;
+  float* y = out + (size_t)row * C;
+  __shared__ float rsq[256];
+
+  float sq = 0.f;
+  for (int j = t; j < C; j += nt) { float v = x[j]; sq += v * v; }
+  rsq[t] = sq; __syncthreads();
+  for (int k = nt / 2; k > 0; k >>= 1) {
+    if (t < k) rsq[t] += rsq[t + k];
+    __syncthreads();
+  }
+
+  float inv = rsqrtf(rsq[0] / C + eps);
+  for (int j = t; j < C; j += nt) y[j] = x[j] * inv * gamma[j];
+}
+
+// cpu references
 static void layernorm_cpu(const std::vector<float>& in, std::vector<float>& out,
                           const std::vector<float>& gamma, const std::vector<float>& beta,
                           int R, int C, float eps) {
@@ -76,6 +97,18 @@ static void layernorm_cpu(const std::vector<float>& in, std::vector<float>& out,
   }
 }
 
+static void rmsnorm_cpu(const std::vector<float>& in, std::vector<float>& out,
+                        const std::vector<float>& gamma, int R, int C, float eps) {
+  for (int r = 0; r < R; ++r) {
+    const float* x = in.data() + (size_t)r * C;
+    float* y = out.data() + (size_t)r * C;
+    float sq = 0.f;
+    for (int j = 0; j < C; ++j) sq += x[j] * x[j];
+    float inv = 1.f / sqrtf(sq / C + eps);
+    for (int j = 0; j < C; ++j) y[j] = x[j] * inv * gamma[j];
+  }
+}
+
 int main() {
   const int R = 4096, C = 1024;
   const float eps = 1e-5f;
@@ -84,10 +117,11 @@ int main() {
   const size_t cbytes = (size_t)C * sizeof(float);
 
   // --- host buffers + inputs ---
-  std::vector<float> h_in(n), h_out(n), h_ref(n), h_gamma(C), h_beta(C);
+  std::vector<float> h_in(n), h_out(n), h_ref(n), h_ref_rms(n), h_gamma(C), h_beta(C);
   for (size_t i = 0; i < n; ++i) h_in[i] = ((i % 17) - 8) * 0.5f;
   for (int j = 0; j < C; ++j) { h_gamma[j] = 1.f + (j % 5) * 0.1f; h_beta[j] = (j % 3) * 0.1f; }
   layernorm_cpu(h_in, h_ref, h_gamma, h_beta, R, C, eps);
+  rmsnorm_cpu(h_in, h_ref_rms, h_gamma, R, C, eps);
 
   // --- device buffers + copy inputs over ---
   float *d_in, *d_out, *d_gamma, *d_beta;
@@ -101,8 +135,8 @@ int main() {
 
   GpuTimer timer;
 
-  // time a launch, copy result back, check vs reference
-  auto bench = [&](const char* name, std::function<void()> launch) {
+  // time a launch, copy result back, check vs a given reference
+  auto bench = [&](const char* name, const std::vector<float>& ref, std::function<void()> launch) {
     launch(); CUDA_CHECK(cudaDeviceSynchronize());  // warm up
     timer.start();
     launch();
@@ -111,18 +145,21 @@ int main() {
     CUDA_CHECK(cudaMemcpy(h_out.data(), d_out, bytes, cudaMemcpyDeviceToHost));
 
     double max_err = 0.0;
-    for (size_t i = 0; i < n; ++i) max_err = fmax(max_err, fabs(h_out[i] - h_ref[i]));
+    for (size_t i = 0; i < n; ++i) max_err = fmax(max_err, fabs(h_out[i] - ref[i]));
     printf("%-20s %.3f ms  max_err=%.2e  %s\n",
            name, ms, max_err, (max_err < 1e-4) ? "OK" : "FAIL");
   };
 
   const int threads = 256;
   printf("LayerNorm  R=%d C=%d\n", R, C);
-  bench("naive (1 thread/row)", [&]{
+  bench("naive (1 thread/row)", h_ref, [&]{
     layernorm_naive<<<(R + threads - 1) / threads, threads>>>(d_in, d_out, d_gamma, d_beta, R, C, eps);
   });
-  bench("block (reduction)", [&]{
+  bench("block (reduction)", h_ref, [&]{
     layernorm_block<<<R, threads>>>(d_in, d_out, d_gamma, d_beta, R, C, eps);
+  });
+  bench("rmsnorm (block)", h_ref_rms, [&]{
+    rmsnorm_block<<<R, threads>>>(d_in, d_out, d_gamma, R, C, eps);
   });
 
   cudaFree(d_in); cudaFree(d_out); cudaFree(d_gamma); cudaFree(d_beta);

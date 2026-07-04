@@ -1,13 +1,15 @@
 // layernorm over rows of an RxC matrix:
 //   y[j] = (x[j] - mean) / sqrt(var + eps) * gamma[j] + beta[j].
-// gamma/beta are per-column learned scale/shift. naive: one thread per row.
+// gamma/beta are per-column learned scale/shift.
+// compares naive (1 thread/row) vs block reduction (1 block/row).
 
 #include <cstdio>
 #include <vector>
 #include <cmath>
+#include <functional>
 #include "../common/cuda_utils.h"
 
-// one thread per row
+// naive: one thread does one whole row
 __global__ void layernorm_naive(const float* in, float* out,
                                 const float* gamma, const float* beta,
                                 int R, int C, float eps) {
@@ -26,6 +28,39 @@ __global__ void layernorm_naive(const float* in, float* out,
 
   float inv = rsqrtf(var + eps);
   for (int j = 0; j < C; ++j) y[j] = (x[j] - mean) * inv * gamma[j] + beta[j];
+}
+
+// block: one block per row, threads split columns + reduce in shared mem
+__global__ void layernorm_block(const float* in, float* out,
+                                 const float* gamma, const float* beta,
+                                 int R, int C, float eps) {
+  int row = blockIdx.x;
+  int t = threadIdx.x, nt = blockDim.x;
+  const float* x = in + (size_t)row * C;
+  float* y = out + (size_t)row * C;
+  __shared__ float red[256];
+
+  // mean: reduce the sum
+  float s = 0.f;
+  for (int j = t; j < C; j += nt) s += x[j];
+  red[t] = s; __syncthreads();
+  for (int k = nt / 2; k > 0; k >>= 1) {
+    if (t < k) red[t] += red[t + k];
+    __syncthreads();
+  }
+  float mean = red[0] / C; __syncthreads();
+
+  // var: reduce the sum of squared deviations
+  float v = 0.f;
+  for (int j = t; j < C; j += nt) { float d = x[j] - mean; v += d * d; }
+  red[t] = v; __syncthreads();
+  for (int k = nt / 2; k > 0; k >>= 1) {
+    if (t < k) red[t] += red[t + k];
+    __syncthreads();
+  }
+  float inv = rsqrtf(red[0] / C + eps); __syncthreads();
+
+  for (int j = t; j < C; j += nt) y[j] = (x[j] - mean) * inv * gamma[j] + beta[j];
 }
 
 // cpu reference
@@ -69,26 +104,31 @@ int main() {
   CUDA_CHECK(cudaMemcpy(d_gamma, h_gamma.data(), cbytes, cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_beta, h_beta.data(), cbytes, cudaMemcpyHostToDevice));
 
-  // --- launch: one thread per row ---
-  const int threads = 256;
-  const int blocks = (R + threads - 1) / threads;
-  layernorm_naive<<<blocks, threads>>>(d_in, d_out, d_gamma, d_beta, R, C, eps);  // warm up
-  CUDA_CHECK(cudaDeviceSynchronize());
-
   GpuTimer timer;
-  timer.start();
-  layernorm_naive<<<blocks, threads>>>(d_in, d_out, d_gamma, d_beta, R, C, eps);
-  float ms = timer.stop();
-  CUDA_CHECK(cudaGetLastError());
 
-  CUDA_CHECK(cudaMemcpy(h_out.data(), d_out, bytes, cudaMemcpyDeviceToHost));
+  // time a launch, copy result back, check vs reference
+  auto bench = [&](const char* name, std::function<void()> launch) {
+    launch(); CUDA_CHECK(cudaDeviceSynchronize());  // warm up
+    timer.start();
+    launch();
+    float ms = timer.stop();
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpy(h_out.data(), d_out, bytes, cudaMemcpyDeviceToHost));
 
-  // --- verify vs cpu reference ---
-  double max_err = 0.0;
-  for (size_t i = 0; i < n; ++i) max_err = fmax(max_err, fabs(h_out[i] - h_ref[i]));
+    double max_err = 0.0;
+    for (size_t i = 0; i < n; ++i) max_err = fmax(max_err, fabs(h_out[i] - h_ref[i]));
+    printf("%-20s %.3f ms  max_err=%.2e  %s\n",
+           name, ms, max_err, (max_err < 1e-4) ? "OK" : "FAIL");
+  };
 
-  printf("layernorm_naive  R=%d C=%d  %.3f ms  max_err=%.2e  %s\n",
-         R, C, ms, max_err, (max_err < 1e-4) ? "OK" : "FAIL");
+  const int threads = 256;
+  printf("LayerNorm  R=%d C=%d\n", R, C);
+  bench("naive (1 thread/row)", [&]{
+    layernorm_naive<<<(R + threads - 1) / threads, threads>>>(d_in, d_out, d_gamma, d_beta, R, C, eps);
+  });
+  bench("block (reduction)", [&]{
+    layernorm_block<<<R, threads>>>(d_in, d_out, d_gamma, d_beta, R, C, eps);
+  });
 
   cudaFree(d_in); cudaFree(d_out); cudaFree(d_gamma); cudaFree(d_beta);
   return 0;

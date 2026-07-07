@@ -138,6 +138,65 @@ __global__ void matmul_reg2d(const float* A, const float* B, float* C, int N) {
       Cblk[(threadRow * TM + m) * N + threadCol * TN + n] = acc[m * TN + n];
 }
 
+// vectorized: same 2d tiling but load/store 4 floats at a time (float4).
+// A is loaded transposed into shared mem so the inner register reads are contiguous.
+__global__ void matmul_vec(const float* A, const float* B, float* C, int N) {
+  const int BM = 128, BN = 128, BK = 8, TM = 8, TN = 8;
+  int cRow = blockIdx.y, cCol = blockIdx.x;
+
+  int threadCol = threadIdx.x % (BN / TN);   // 0..15
+  int threadRow = threadIdx.x / (BN / TN);   // 0..15
+
+  __shared__ float As[BK * BM];  // transposed: As[col*BM + row]
+  __shared__ float Bs[BK * BN];
+
+  const float* Ablk = A + cRow * BM * N;
+  const float* Bblk = B + cCol * BN;
+  float* Cblk = C + cRow * BM * N + cCol * BN;
+
+  // float4 load indices
+  int innerRowA = threadIdx.x / (BK / 4), innerColA = threadIdx.x % (BK / 4);
+  int innerRowB = threadIdx.x / (BN / 4), innerColB = threadIdx.x % (BN / 4);
+
+  float acc[TM * TN] = {0.f};
+  float regM[TM], regN[TN];
+
+  for (int bk = 0; bk < N; bk += BK) {
+    // load 4 A floats, scatter transposed into As
+    float4 a = reinterpret_cast<const float4*>(&Ablk[innerRowA * N + innerColA * 4])[0];
+    As[(innerColA * 4 + 0) * BM + innerRowA] = a.x;
+    As[(innerColA * 4 + 1) * BM + innerRowA] = a.y;
+    As[(innerColA * 4 + 2) * BM + innerRowA] = a.z;
+    As[(innerColA * 4 + 3) * BM + innerRowA] = a.w;
+    // load 4 B floats straight through
+    reinterpret_cast<float4*>(&Bs[innerRowB * BN + innerColB * 4])[0] =
+        reinterpret_cast<const float4*>(&Bblk[innerRowB * N + innerColB * 4])[0];
+    __syncthreads();
+    Ablk += BK;
+    Bblk += BK * N;
+
+    for (int dot = 0; dot < BK; ++dot) {
+      for (int i = 0; i < TM; ++i) regM[i] = As[dot * BM + threadRow * TM + i];
+      for (int i = 0; i < TN; ++i) regN[i] = Bs[dot * BN + threadCol * TN + i];
+      for (int m = 0; m < TM; ++m)
+        for (int n = 0; n < TN; ++n)
+          acc[m * TN + n] += regM[m] * regN[n];
+    }
+    __syncthreads();
+  }
+
+  // vectorized store, 4 outputs at a time
+  for (int m = 0; m < TM; ++m)
+    for (int n = 0; n < TN; n += 4) {
+      float4 t;
+      t.x = acc[m * TN + n + 0];
+      t.y = acc[m * TN + n + 1];
+      t.z = acc[m * TN + n + 2];
+      t.w = acc[m * TN + n + 3];
+      reinterpret_cast<float4*>(&Cblk[(threadRow * TM + m) * N + threadCol * TN + n])[0] = t;
+    }
+}
+
 // matmul does 2*N^3 flops; this turns time into GFLOP/s
 static double gflops(int N, float ms) {
   return (2.0 * N * N * N) / (ms / 1e3) / 1e9;
@@ -209,6 +268,9 @@ int main() {
   // 2d register-tiled: 256 threads/block, each computes 8x8 outputs (128x128 tile)
   dim3 r2block(128 * 128 / (8 * 8)), r2grid(N / 128, N / 128);
   bench("reg (2d tile)", [&]{ matmul_reg2d<<<r2grid, r2block>>>(d_A, d_B, d_C, N); });
+
+  // same tiling with float4 vectorized loads/stores
+  bench("vec (float4)", [&]{ matmul_vec<<<r2grid, r2block>>>(d_A, d_B, d_C, N); });
 
   cublasDestroy(handle);
   cudaFree(d_A); cudaFree(d_B); cudaFree(d_C);

@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <vector>
 #include <cmath>
+#include <functional>
 #include <cublas_v2.h>
 #include "../common/cuda_utils.h"
 
@@ -65,9 +66,6 @@ int main() {
   CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), bytes, cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), bytes, cudaMemcpyHostToDevice));
 
-  // launch grid: one thread per output element, TILExTILE blocks
-  dim3 block(TILE, TILE);
-  dim3 grid(N / TILE, N / TILE);
   GpuTimer timer;
 
   // --- cuBLAS baseline (correctness ref + speed target) ---
@@ -83,12 +81,12 @@ int main() {
   float ms_cublas = timer.stop();
   CUDA_CHECK(cudaMemcpy(h_ref.data(), d_C, bytes, cudaMemcpyDeviceToHost));  // save as reference
 
-  // run a kernel, time it, check it against the cuBLAS reference
-  auto run = [&](const char* name, void (*kern)(const float*, const float*, float*, int)) {
-    kern<<<grid, block>>>(d_A, d_B, d_C, N);  // warm up
+  // run a kernel launch, time it, check it against the cuBLAS reference
+  auto bench = [&](const char* name, std::function<void()> launch) {
+    launch();  // warm up
     CUDA_CHECK(cudaDeviceSynchronize());
     timer.start();
-    kern<<<grid, block>>>(d_A, d_B, d_C, N);
+    launch();
     float ms = timer.stop();
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaMemcpy(h_C.data(), d_C, bytes, cudaMemcpyDeviceToHost));
@@ -106,8 +104,10 @@ int main() {
   printf("Matmul  N=%d  (cuBLAS = baseline)\n", N);
   printf("%-14s %8.2f ms  %8.1f GFLOP/s  (baseline)\n",
          "cublas", ms_cublas, gflops(N, ms_cublas));
-  run("naive", matmul_naive);
-  run("tiled", matmul_tiled);
+
+  dim3 block(TILE, TILE), grid(N / TILE, N / TILE);
+  bench("naive", [&]{ matmul_naive<<<grid, block>>>(d_A, d_B, d_C, N); });
+  bench("tiled", [&]{ matmul_tiled<<<grid, block>>>(d_A, d_B, d_C, N); });
 
   cublasDestroy(handle);
   cudaFree(d_A); cudaFree(d_B); cudaFree(d_C);

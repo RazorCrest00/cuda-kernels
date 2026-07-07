@@ -15,17 +15,21 @@ A small `max_err` vs cublas is just float rounding (different sum order), not a 
 
 ## results (N=2048, T4)
 
-| version | GFLOP/s | vs tiled | notes |
-|---------|---------|----------|-------|
-| cublas        | ~2800-4400 | — | baseline (Tensor Cores) |
-| naive         | ~330  | 0.6x | all global-memory reads |
-| tiled         | ~510  | 1x   | basic 16x16 shared-mem tile |
-| reg (1d tile) | ~1930 | ~3.8x | each thread computes 8 outputs, sums in registers |
+optimization climb (N=2048, one T4 run; cublas = 5260 GFLOP/s that run):
+
+| version | GFLOP/s | % of cublas | what changed |
+|---------|---------|-------------|--------------|
+| cublas        | 5260 | 100% | baseline (Tensor Cores) |
+| naive         |  438 |   8% | all global-memory reads |
+| tiled         |  769 |  15% | 16x16 shared-mem tile |
+| reg (1d tile) | 1922 |  37% | each thread does 8 outputs, sums in registers |
+| reg (2d tile) | 4147 |  79% | each thread does an 8x8 output block |
+| vec (float4)  | 4627 |  88% | float4 vectorized loads/stores |
 
 max_err vs cublas ≈ 2.3e-3 (float rounding, expected). T4 FP32 peak ≈ 8,100 GFLOP/s.
-absolute GFLOP/s drifts run-to-run (GPU boost clocks); the ratios are the point.
-reg tiling closes most of the gap to cublas. remaining gap = vectorized loads,
-2D register tiles, and Tensor Cores (what cublas uses).
+absolute GFLOP/s drifts run-to-run (GPU boost clocks); the % / ratios are the point.
+88% of cublas from a hand-written kernel. remaining gap = Tensor Cores (wmma/mma),
+double-buffering/prefetch, and autotuned tile sizes.
 
 ## run
 

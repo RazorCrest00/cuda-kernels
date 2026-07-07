@@ -81,7 +81,7 @@ __global__ void attn_online(const float* Q, const float* K, const float* V,
 // slice of keys -> partial (m,l,acc), then the partials are merged. the merge
 // is the same online-softmax rescale, so splitting the keys is exact.
 __global__ void attn_flash(const float* Q, const float* K, const float* V,
-                           float* O, int S, int d, float scale) {
+                           float* O, int S, int d, float scale, int causal) {
   int i = blockIdx.x;                 // query
   int t = threadIdx.x, nt = blockDim.x;
 
@@ -98,6 +98,7 @@ __global__ void attn_flash(const float* Q, const float* K, const float* V,
   float acc[DMAX];
   for (int x = 0; x < d; ++x) acc[x] = 0.f;
   for (int j = t; j < S; j += nt) {
+    if (causal && j > i) break;       // can't attend to future tokens
     const float* k = K + (size_t)j * d;
     const float* v = V + (size_t)j * d;
     float s = 0.f;
@@ -135,21 +136,22 @@ __global__ void attn_flash(const float* Q, const float* K, const float* V,
 // cpu reference
 static void attn_cpu(const std::vector<float>& Q, const std::vector<float>& K,
                      const std::vector<float>& V, std::vector<float>& O,
-                     int S, int d, float scale) {
+                     int S, int d, float scale, int causal) {
   std::vector<float> s(S);
   for (int i = 0; i < S; ++i) {
+    int jmax = causal ? i + 1 : S;    // causal: only keys 0..i
     float m = -INFINITY;
-    for (int j = 0; j < S; ++j) {
+    for (int j = 0; j < jmax; ++j) {
       float dot = 0.f;
       for (int t = 0; t < d; ++t) dot += Q[(size_t)i * d + t] * K[(size_t)j * d + t];
       s[j] = dot * scale;
       m = fmaxf(m, s[j]);
     }
     float l = 0.f;
-    for (int j = 0; j < S; ++j) { s[j] = expf(s[j] - m); l += s[j]; }
+    for (int j = 0; j < jmax; ++j) { s[j] = expf(s[j] - m); l += s[j]; }
     for (int t = 0; t < d; ++t) {
       float acc = 0.f;
-      for (int j = 0; j < S; ++j) acc += (s[j] / l) * V[(size_t)j * d + t];
+      for (int j = 0; j < jmax; ++j) acc += (s[j] / l) * V[(size_t)j * d + t];
       O[(size_t)i * d + t] = acc;
     }
   }
@@ -162,13 +164,14 @@ int main() {
   const size_t bytes = n * sizeof(float);
 
   // --- host buffers + inputs (small deterministic values) ---
-  std::vector<float> h_Q(n), h_K(n), h_V(n), h_O(n), h_ref(n);
+  std::vector<float> h_Q(n), h_K(n), h_V(n), h_O(n), h_ref(n), h_ref_causal(n);
   for (size_t i = 0; i < n; ++i) {
     h_Q[i] = ((int)(i % 13) - 6) * 0.1f;
     h_K[i] = ((int)(i % 7) - 3) * 0.1f;
     h_V[i] = ((int)(i % 11) - 5) * 0.1f;
   }
-  attn_cpu(h_Q, h_K, h_V, h_ref, S, d, scale);
+  attn_cpu(h_Q, h_K, h_V, h_ref, S, d, scale, 0);
+  attn_cpu(h_Q, h_K, h_V, h_ref_causal, S, d, scale, 1);
 
   // --- device buffers + copy inputs over ---
   float *d_Q, *d_K, *d_V, *d_O;
@@ -205,7 +208,10 @@ int main() {
     attn_online<<<(S + threads - 1) / threads, threads>>>(d_Q, d_K, d_V, d_O, S, d, scale);
   });
   bench("flash (block/query)", h_ref, [&]{
-    attn_flash<<<S, threads>>>(d_Q, d_K, d_V, d_O, S, d, scale);  // threads must be <= 128
+    attn_flash<<<S, threads>>>(d_Q, d_K, d_V, d_O, S, d, scale, 0);  // threads must be <= 128
+  });
+  bench("flash causal", h_ref_causal, [&]{
+    attn_flash<<<S, threads>>>(d_Q, d_K, d_V, d_O, S, d, scale, 1);
   });
 
   cudaFree(d_Q); cudaFree(d_K); cudaFree(d_V); cudaFree(d_O);

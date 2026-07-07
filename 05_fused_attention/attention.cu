@@ -182,7 +182,7 @@ int main() {
 
   GpuTimer timer;
 
-  auto bench = [&](const char* name, std::function<void()> launch) {
+  auto bench = [&](const char* name, const std::vector<float>& ref, std::function<void()> launch) {
     launch(); CUDA_CHECK(cudaDeviceSynchronize());  // warm up
     timer.start();
     launch();
@@ -191,20 +191,20 @@ int main() {
     CUDA_CHECK(cudaMemcpy(h_O.data(), d_O, bytes, cudaMemcpyDeviceToHost));
 
     double max_err = 0.0;
-    for (size_t i = 0; i < n; ++i) max_err = fmax(max_err, fabs(h_O[i] - h_ref[i]));
-    printf("%-16s %.3f ms  max_err=%.2e  %s\n",
+    for (size_t i = 0; i < n; ++i) max_err = fmax(max_err, fabs(h_O[i] - ref[i]));
+    printf("%-20s %.3f ms  max_err=%.2e  %s\n",
            name, ms, max_err, (max_err < 1e-3) ? "OK" : "FAIL");
   };
 
   printf("Attention  S=%d d=%d\n", S, d);
   const int threads = 128;
-  bench("naive", [&]{
+  bench("naive", h_ref, [&]{
     attn_naive<<<(S + threads - 1) / threads, threads>>>(d_Q, d_K, d_V, d_O, S, d, scale);
   });
-  bench("online", [&]{
+  bench("online", h_ref, [&]{
     attn_online<<<(S + threads - 1) / threads, threads>>>(d_Q, d_K, d_V, d_O, S, d, scale);
   });
-  bench("flash (block/query)", [&]{
+  bench("flash (block/query)", h_ref, [&]{
     attn_flash<<<S, threads>>>(d_Q, d_K, d_V, d_O, S, d, scale);  // threads must be <= 128
   });
 

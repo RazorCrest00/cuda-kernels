@@ -45,6 +45,38 @@ __global__ void attn_naive(const float* Q, const float* K, const float* V,
   }
 }
 
+// online softmax: single pass over keys. keep running max m, sum l, and output
+// acc; when a new max appears, rescale l and acc by exp(old_m - new_m).
+// this is the FlashAttention core -- the full score row is never materialized.
+__global__ void attn_online(const float* Q, const float* K, const float* V,
+                            float* O, int S, int d, float scale) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= S) return;
+  const float* q = Q + (size_t)i * d;
+
+  float m = -INFINITY, l = 0.f;
+  float acc[DMAX];
+  for (int t = 0; t < d; ++t) acc[t] = 0.f;
+
+  for (int j = 0; j < S; ++j) {
+    const float* k = K + (size_t)j * d;
+    const float* v = V + (size_t)j * d;
+    float s = 0.f;
+    for (int t = 0; t < d; ++t) s += q[t] * k[t];
+    s *= scale;
+
+    float m_new = fmaxf(m, s);
+    float corr = expf(m - m_new);   // rescale old running values
+    float p = expf(s - m_new);      // weight of this key
+    l = l * corr + p;
+    for (int t = 0; t < d; ++t) acc[t] = acc[t] * corr + p * v[t];
+    m = m_new;
+  }
+
+  float* o = O + (size_t)i * d;
+  for (int t = 0; t < d; ++t) o[t] = acc[t] / l;
+}
+
 // cpu reference
 static void attn_cpu(const std::vector<float>& Q, const std::vector<float>& K,
                      const std::vector<float>& V, std::vector<float>& O,
@@ -113,6 +145,9 @@ int main() {
   const int threads = 128;
   bench("naive", [&]{
     attn_naive<<<(S + threads - 1) / threads, threads>>>(d_Q, d_K, d_V, d_O, S, d, scale);
+  });
+  bench("online", [&]{
+    attn_online<<<(S + threads - 1) / threads, threads>>>(d_Q, d_K, d_V, d_O, S, d, scale);
   });
 
   cudaFree(d_Q); cudaFree(d_K); cudaFree(d_V); cudaFree(d_O);

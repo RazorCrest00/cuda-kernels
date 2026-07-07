@@ -33,7 +33,7 @@ Checked against CPU references (non-causal and causal). (config: S=512, d=64, th
 | naive               | 27.23 ms | 1x    | 3 passes, recompute scores |
 | online              | 6.64 ms  | ~4x   | single pass, flash core |
 | flash (block/query) | 4.31 ms  | ~6.3x | parallel over keys |
-| flash causal        | TBD      | —     | causal mask (decoder attention) |
+| flash causal        | 3.95 ms  | —     | causal mask (decoder attention); skips ~half the keys |
 
 all correct (max_err ~1e-9 vs cpu reference).
 

@@ -21,3 +21,7 @@ n = 2^24 (16.7M elements).
 ```bash
 make 01_vector_add && ./build/01_vector_add
 ```
+
+## reference
+
+- Mark Harris, "An Even Easier Introduction to CUDA" — https://developer.nvidia.com/blog/even-easier-introduction-cuda/

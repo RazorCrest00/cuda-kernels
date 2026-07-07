@@ -34,3 +34,10 @@ both max_err = 0 vs cpu reference.
 ```bash
 make 03_softmax && ./build/03_softmax
 ```
+
+## reference
+
+The block-reduction pattern (row max / sum) is the classic parallel reduction:
+
+- Mark Harris, "Optimizing Parallel Reduction in CUDA" — https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf
+- online softmax (the stable, streaming form) — Milakov & Gimelshein, "Online normalizer calculation for softmax" — https://arxiv.org/abs/1805.02867

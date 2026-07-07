@@ -36,3 +36,10 @@ double-buffering/prefetch, and autotuned tile sizes.
 ```bash
 make 02_matmul && ./build/02_matmul
 ```
+
+## reference
+
+Optimization ladder (tiling -> 1D/2D register tiling -> float4 vectorized loads)
+follows this worklog closely:
+
+- Simon Boehm, "How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance" — https://siboehm.com/articles/22/CUDA-MMM

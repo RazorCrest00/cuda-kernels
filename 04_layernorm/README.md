@@ -39,3 +39,9 @@ all max_err = 0 vs cpu references.
 ```bash
 make 04_layernorm && ./build/04_layernorm
 ```
+
+## reference
+
+- Mark Harris, "Optimizing Parallel Reduction in CUDA" (mean/var reduction) — https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf
+- Karpathy, llm.c — layernorm/rmsnorm CUDA kernels — https://github.com/karpathy/llm.c
+- RMSNorm — Zhang & Sennrich, "Root Mean Square Layer Normalization" — https://arxiv.org/abs/1910.07467

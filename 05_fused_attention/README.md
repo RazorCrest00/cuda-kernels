@@ -21,8 +21,10 @@ fast, and why modern LLM serving (vLLM, SGLang) relies on it.
 - **online** — one thread per query, single pass with online softmax (no score buffer).
 - **flash (block/query)** — one block per query; threads split the keys, each does an
   online-softmax partial, then the partials are merged (the merge is associative).
+- **flash causal** — same kernel with a causal mask: query i only attends to keys j<=i
+  (a token can't see the future). This is what a decoder LLM actually uses.
 
-Checked against a CPU reference. (config: S=512, d=64, threads<=128.)
+Checked against CPU references (non-causal and causal). (config: S=512, d=64, threads<=128.)
 
 ## results (S=512, d=64, T4)
 
@@ -31,6 +33,7 @@ Checked against a CPU reference. (config: S=512, d=64, threads<=128.)
 | naive               | 27.23 ms | 1x    | 3 passes, recompute scores |
 | online              | 6.64 ms  | ~4x   | single pass, flash core |
 | flash (block/query) | 4.31 ms  | ~6.3x | parallel over keys |
+| flash causal        | TBD      | —     | causal mask (decoder attention) |
 
 all correct (max_err ~1e-9 vs cpu reference).
 
@@ -47,6 +50,9 @@ make 05_fused_attention && ./build/05_fused_attention
 
 ## next steps (not done yet)
 
-- tile K/V into shared memory (cooperative loads, reuse across the block)
-- causal masking (skip keys j > i)
+- **query tiling** — one block per *block of queries*, so a loaded K/V tile in shared
+  memory is reused across many queries. (in the current one-block-per-query design each
+  K/V row is read by exactly one thread, so shared-mem tiling alone buys nothing — you
+  need query tiling to create the reuse.) this is the real FlashAttention layout.
 - multi-head / batched
+- fp16 / bf16 inputs

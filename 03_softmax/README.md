@@ -24,8 +24,10 @@ Checked against a CPU reference.
 
 | version | time | notes |
 |---------|------|-------|
-| naive (1 thread/row) | TBD | most of the GPU idle |
-| block (reduction)    | TBD | fills the GPU |
+| naive (1 thread/row) | 0.967 ms | most of the GPU idle |
+| block (reduction)    | 0.168 ms | ~5.8x faster, fills the GPU |
+
+both max_err = 0 vs cpu reference.
 
 ## run
 

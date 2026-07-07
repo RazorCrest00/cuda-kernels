@@ -17,11 +17,13 @@ A small `max_err` vs cublas is just float rounding (different sum order), not a 
 
 | version | time | GFLOP/s | notes |
 |---------|------|---------|-------|
-| cublas  | TBD  | TBD     | baseline (uses Tensor Cores) |
-| naive   | TBD  | TBD     | |
-| tiled   | TBD  | TBD     | shared-memory tiling |
+| cublas  | 3.86 ms  | 4446.4 | baseline (Tensor Cores) |
+| naive   | 47.18 ms | 364.2  | all global-memory reads |
+| tiled   | 29.22 ms | 588.0  | ~1.6x over naive, still 7.5x behind cublas |
 
-T4 FP32 peak ≈ 8,100 GFLOP/s.
+max_err vs cublas ≈ 2.3e-3 (float rounding, expected). T4 FP32 peak ≈ 8,100 GFLOP/s.
+tiled is a basic 16x16 tile — no register blocking / vectorization / Tensor Cores yet,
+which is why cublas is still miles ahead.
 
 ## run
 

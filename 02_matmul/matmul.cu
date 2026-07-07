@@ -45,6 +45,49 @@ __global__ void matmul_tiled(const float* A, const float* B, float* C, int N) {
   C[row * N + col] = acc;
 }
 
+// register-tiled: each thread computes TM outputs (a column), keeping the
+// running sums in registers. block tile is BM x BN, inner K-step is BK.
+// each B value loaded from shared mem is reused across all TM results.
+__global__ void matmul_reg(const float* A, const float* B, float* C, int N) {
+  const int BM = 64, BN = 64, BK = 8, TM = 8;
+  int cRow = blockIdx.y, cCol = blockIdx.x;
+
+  __shared__ float As[BM * BK];
+  __shared__ float Bs[BK * BN];
+
+  int threadCol = threadIdx.x % BN;   // 0..63
+  int threadRow = threadIdx.x / BN;   // 0..7  (blockDim = 512)
+
+  // move pointers to this block's top-left
+  const float* Ablk = A + cRow * BM * N;
+  const float* Bblk = B + cCol * BN;
+  float* Cblk = C + cRow * BM * N + cCol * BN;
+
+  // which element each thread loads into shared mem
+  int innerColA = threadIdx.x % BK, innerRowA = threadIdx.x / BK;  // 64x8
+  int innerColB = threadIdx.x % BN, innerRowB = threadIdx.x / BN;  // 8x64
+
+  float acc[TM] = {0.f};
+
+  for (int bk = 0; bk < N; bk += BK) {
+    As[innerRowA * BK + innerColA] = Ablk[innerRowA * N + innerColA];
+    Bs[innerRowB * BN + innerColB] = Bblk[innerRowB * N + innerColB];
+    __syncthreads();
+    Ablk += BK;        // step along K (across A's columns)
+    Bblk += BK * N;    // step along K (down B's rows)
+
+    for (int dot = 0; dot < BK; ++dot) {
+      float tmpB = Bs[dot * BN + threadCol];        // reused across all TM
+      for (int r = 0; r < TM; ++r)
+        acc[r] += As[(threadRow * TM + r) * BK + dot] * tmpB;
+    }
+    __syncthreads();
+  }
+
+  for (int r = 0; r < TM; ++r)
+    Cblk[(threadRow * TM + r) * N + threadCol] = acc[r];
+}
+
 // matmul does 2*N^3 flops; this turns time into GFLOP/s
 static double gflops(int N, float ms) {
   return (2.0 * N * N * N) / (ms / 1e3) / 1e9;
@@ -108,6 +151,10 @@ int main() {
   dim3 block(TILE, TILE), grid(N / TILE, N / TILE);
   bench("naive", [&]{ matmul_naive<<<grid, block>>>(d_A, d_B, d_C, N); });
   bench("tiled", [&]{ matmul_tiled<<<grid, block>>>(d_A, d_B, d_C, N); });
+
+  // register-tiled: 512 threads/block, each computes TM=8 outputs (64x64 tile)
+  dim3 rblock(64 * 64 / 8), rgrid(N / 64, N / 64);
+  bench("reg (1d tile)", [&]{ matmul_reg<<<rgrid, rblock>>>(d_A, d_B, d_C, N); });
 
   cublasDestroy(handle);
   cudaFree(d_A); cudaFree(d_B); cudaFree(d_C);

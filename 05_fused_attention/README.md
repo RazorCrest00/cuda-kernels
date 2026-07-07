@@ -26,11 +26,13 @@ Checked against a CPU reference. (config: S=512, d=64, threads<=128.)
 
 ## results (S=512, d=64, T4)
 
-| version | time | notes |
-|---------|------|-------|
-| naive               | TBD | 3 passes, recompute scores |
-| online              | TBD | single pass, flash core |
-| flash (block/query) | TBD | parallel over keys |
+| version | time | vs naive | notes |
+|---------|------|----------|-------|
+| naive               | 27.23 ms | 1x    | 3 passes, recompute scores |
+| online              | 6.64 ms  | ~4x   | single pass, flash core |
+| flash (block/query) | 4.31 ms  | ~6.3x | parallel over keys |
+
+all correct (max_err ~1e-9 vs cpu reference).
 
 ## run
 

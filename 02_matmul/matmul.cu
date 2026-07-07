@@ -88,6 +88,56 @@ __global__ void matmul_reg(const float* A, const float* B, float* C, int N) {
     Cblk[(threadRow * TM + r) * N + threadCol] = acc[r];
 }
 
+// 2d register tiling: each thread computes a TM x TN block of outputs.
+// A-column and B-row values are pulled into registers once and reused across
+// the whole TMxTN tile (TM*TN multiply-adds per pair of register loads).
+__global__ void matmul_reg2d(const float* A, const float* B, float* C, int N) {
+  const int BM = 128, BN = 128, BK = 8, TM = 8, TN = 8;
+  int cRow = blockIdx.y, cCol = blockIdx.x;
+
+  int threadCol = threadIdx.x % (BN / TN);   // 0..15
+  int threadRow = threadIdx.x / (BN / TN);   // 0..15  (blockDim = 256)
+
+  __shared__ float As[BM * BK];
+  __shared__ float Bs[BK * BN];
+
+  const float* Ablk = A + cRow * BM * N;
+  const float* Bblk = B + cCol * BN;
+  float* Cblk = C + cRow * BM * N + cCol * BN;
+
+  // gmem->smem load indices (each thread loads several elements, strided)
+  int innerRowA = threadIdx.x / BK, innerColA = threadIdx.x % BK;
+  int strideA = (BM * BN / (TM * TN)) / BK;   // 32
+  int innerRowB = threadIdx.x / BN, innerColB = threadIdx.x % BN;
+  int strideB = (BM * BN / (TM * TN)) / BN;   // 2
+
+  float acc[TM * TN] = {0.f};
+  float regM[TM], regN[TN];
+
+  for (int bk = 0; bk < N; bk += BK) {
+    for (int o = 0; o < BM; o += strideA)
+      As[(innerRowA + o) * BK + innerColA] = Ablk[(innerRowA + o) * N + innerColA];
+    for (int o = 0; o < BK; o += strideB)
+      Bs[(innerRowB + o) * BN + innerColB] = Bblk[(innerRowB + o) * N + innerColB];
+    __syncthreads();
+    Ablk += BK;
+    Bblk += BK * N;
+
+    for (int dot = 0; dot < BK; ++dot) {
+      for (int i = 0; i < TM; ++i) regM[i] = As[(threadRow * TM + i) * BK + dot];
+      for (int i = 0; i < TN; ++i) regN[i] = Bs[dot * BN + threadCol * TN + i];
+      for (int m = 0; m < TM; ++m)
+        for (int n = 0; n < TN; ++n)
+          acc[m * TN + n] += regM[m] * regN[n];
+    }
+    __syncthreads();
+  }
+
+  for (int m = 0; m < TM; ++m)
+    for (int n = 0; n < TN; ++n)
+      Cblk[(threadRow * TM + m) * N + threadCol * TN + n] = acc[m * TN + n];
+}
+
 // matmul does 2*N^3 flops; this turns time into GFLOP/s
 static double gflops(int N, float ms) {
   return (2.0 * N * N * N) / (ms / 1e3) / 1e9;
@@ -155,6 +205,10 @@ int main() {
   // register-tiled: 512 threads/block, each computes TM=8 outputs (64x64 tile)
   dim3 rblock(64 * 64 / 8), rgrid(N / 64, N / 64);
   bench("reg (1d tile)", [&]{ matmul_reg<<<rgrid, rblock>>>(d_A, d_B, d_C, N); });
+
+  // 2d register-tiled: 256 threads/block, each computes 8x8 outputs (128x128 tile)
+  dim3 r2block(128 * 128 / (8 * 8)), r2grid(N / 128, N / 128);
+  bench("reg (2d tile)", [&]{ matmul_reg2d<<<r2grid, r2block>>>(d_A, d_B, d_C, N); });
 
   cublasDestroy(handle);
   cudaFree(d_A); cudaFree(d_B); cudaFree(d_C);

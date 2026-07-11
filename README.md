@@ -18,7 +18,7 @@ make 01_vector_add      # build one kernel
 make all                # build everything
 ```
 
-### Google Colab
+## Google Colab
 
 1. Runtime → Change runtime type → T4 GPU
 2. `!nvcc --version` to confirm toolkit

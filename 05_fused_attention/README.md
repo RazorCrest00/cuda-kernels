@@ -1,24 +1,20 @@
 # 05 — fused attention
 
-The core of a transformer:
+My attempt at replicating the core of a transformer:
 
 `O = softmax(Q * K^T * scale) * V`   (scale = 1/sqrt(d))
 
 Combines everything in this repo: matmul (Q*K^T and *V), softmax, and reductions.
-Q, K, V, O are (S, d) — single head.
+Q, K, V, O are (S, d) single-head.
 
-## the idea
+## The idea
 
-Naive attention forms the full S×S score matrix (or recomputes it). **FlashAttention**
-never materializes it: it streams over the keys keeping a running max `m`, sum `l`,
-and output `acc`, rescaling by `exp(old_m - new_m)` whenever a bigger score shows up
-(**online softmax**). That keeps the big matrix out of slow memory — which is why it's
-fast, and why modern LLM serving (vLLM, SGLang) relies on it.
+Naive attention forms the full S×S score matrix (or recomputes it). **FlashAttention** streams over the keys, keeping a running max `m`, sum `l`, and output `acc`, rescaling by `exp(old_m - new_m)` whenever a bigger score shows up (**online softmax**). That keeps the big matrix out of slow memory, which is why it's fast. Used in vLLM and SGLang.
 
 ## versions
 
-- **naive** — one thread per query, 3 passes over keys (recompute scores).
-- **online** — one thread per query, single pass with online softmax (no score buffer).
+- **naive** — one thread per query, 3 passes over keys.
+- **online** — one thread per query, single pass with online softmax (no buffer).
 - **flash (block/query)** — one block per query; threads split the keys, each does an
   online-softmax partial, then the partials are merged (the merge is associative).
 - **flash causal** — same kernel with a causal mask: query i only attends to keys j<=i

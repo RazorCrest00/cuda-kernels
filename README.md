@@ -6,6 +6,8 @@ From-scratch GPU kernels, each measured against a reference (cuBLAS / PyTorch) s
 
 Each folder has the kernel, a short README with the math, and benchmark numbers.
 
+Made starting with 0 CUDA knowledge (I've been studying).
+
 ## How 2 run
 
 CUDA can't run on a Mac, so develop locally, compile/run on an NVIDIA GPU

@@ -4,14 +4,13 @@ Softmax over each row of an RxC matrix:
 
 `y[j] = exp(x[j] - max) / sum_k exp(x[k] - max)`
 
-Turns a row of raw scores into a probability distribution (positive, sums to 1).
-Used everywhere in transformers — next-token probs and attention weights.
+Turns a raw row into a probability distribution (positive, sums to 1).
+--> transformer usage
 
-Two ideas this kernel teaches:
+Two main ideas:
 
 - **numerical stability** — subtract the row max first, or `exp(big)` overflows to inf.
-- **reductions** — threads in a block cooperate (shared mem) to compute the row max
-  and sum in parallel. First kernel where threads *combine* values.
+- **reductions** - threads in a block share memory to compute the row max and sum in parallel. First kernel where threads combine values.
 
 Versions:
 
